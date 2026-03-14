@@ -764,6 +764,7 @@
             update(dt) {
                 if(!STATE.active) return;
                 if (this.enemies.length === 0 && !this.spawningWave && this.spawnsPending === 0) {
+                    this.spawningWave = true;
                     // Wave clear bonus
                     if (STATE.wave > 0) {
                         this.showWaveClear(STATE.wave);
@@ -775,8 +776,6 @@
                             showPickupNotify(`WAVE CLEAR! +${healAmount} HP`);
                         }
                     }
-                    
-                    this.spawningWave = true;
                     STATE.wave++;
                     
                     const spawnDelay = STATE.wave === 1 ? 2000 : 4000; // Shorter first wave
@@ -815,6 +814,9 @@
                         }
                     }
                     
+                    // Remove visual bob before physics so collision uses true position
+                    e.mesh.position.y -= e.lastBobY;
+
                     const diff = new THREE.Vector3().subVectors(this.player.pos, e.mesh.position);
                     const dist = diff.length();
                     const horizontalDist = new THREE.Vector3(diff.x, 0, diff.z).length();
@@ -958,10 +960,11 @@
                     e.mesh.lookAt(this.player.pos);
                     if(e.mesh.position.y < -30) { this.kill(i); continue; }
                     
-                    // Enemy bob animation
-                    const bobAmp = 0.07 * e.type.scale;
-                    const bobY = Math.sin(e.jitterTimer * e.type.speed * 5.0) * bobAmp;
+                    // Enemy bob animation — abs(sin) bobs upward only, lastBobY keeps physics clean
+                    const bobAmp = 0.04 * e.type.scale;
+                    const bobY = Math.abs(Math.sin(e.jitterTimer * e.type.speed * 3.0)) * bobAmp;
                     e.mesh.position.y += bobY;
+                    e.lastBobY = bobY;
 
                     // Eye glow — always visible, pulses faster and brighter when close
                     if (e.eyeL) {
@@ -1137,7 +1140,7 @@
                     mesh: group, hp: Math.ceil(baseHP * type.hp), maxHp: Math.ceil(baseHP * type.hp), type,
                     lastAttack: 0, vel: new THREE.Vector3(0, 0, 0), onGround: false, jumpCooldown: 0,
                     stuckTimer: 0, lastY: y + 1, spawnTime: performance.now(), spawning: true,
-                    eyeL, eyeR
+                    eyeL, eyeR, lastBobY: 0
                 });
             }
             
@@ -1152,7 +1155,7 @@
                     let life = 0; const maxLife = 0.8;
                     let lastParticleTime = performance.now();
                     const animate = () => {
-                        if(!STATE.active) return;
+                        if(!STATE.active) { this.scene.remove(particle); particle.geometry.dispose(); particle.material.dispose(); return; }
                         const now = performance.now();
                         const pdt = Math.min((now - lastParticleTime) / 1000, 0.05);
                         lastParticleTime = now;
@@ -1166,7 +1169,7 @@
                     animate();
                 }
             }
-            
+
             createImpactEffect(x, y, z, color = 0x888888) {
                 const particleGeo = new THREE.BoxGeometry(0.15, 0.15, 0.15);
                 const particleMat = new THREE.MeshStandardMaterial({ color, transparent: true, opacity: 0.9 });
@@ -1178,7 +1181,7 @@
                     let life = 0; const maxLife = 0.5;
                     let lastParticleTime = performance.now();
                     const animate = () => {
-                        if(!STATE.active) return;
+                        if(!STATE.active) { this.scene.remove(particle); particle.geometry.dispose(); particle.material.dispose(); return; }
                         const now = performance.now();
                         const pdt = Math.min((now - lastParticleTime) / 1000, 0.05);
                         lastParticleTime = now;
@@ -1694,14 +1697,14 @@
             }
             
             // Hemisphere light — darker at night so torch stands out
-            const hemiIntensity = Math.max(0.08, sunHeight * 0.5 + 0.4);
+            const hemiIntensity = Math.max(0.03, sunHeight * 0.5 + 0.4);
             hemiLight.intensity = hemiIntensity;
 
             // Player torch at night — stronger range, warm flicker
-            const torchBase = Math.max(0, 1.2 - sunHeight * 4);
+            const torchBase = Math.max(0, (1.2 - sunHeight * 4) * 10);
             const flicker = 1.0 + (Math.random() - 0.5) * 0.12;
             playerLight.intensity = torchBase * flicker;
-            playerLight.distance = 18;
+            playerLight.distance = 25;
             playerLight.position.copy(player.pos);
             playerLight.position.y += 1.5;
             playerLight.color.setHex(0xffddaa);
@@ -1895,12 +1898,13 @@
                         STATE.ammo[p.ammoType] += amount;
                         showPickupNotify(`+${amount} ${p.ammoType.toUpperCase()} ammo`);
                     } else if (STATE.stims < STATE.maxStims) { STATE.stims += 1; showPickupNotify('+1 HEALTH STIM'); }
-                    else { showPickupNotify('STIMS FULL'); }
+                    else { showPickupNotify('STIMS FULL'); continue; }
                     audio.playPickup();
+                    if (p.light) { p.mesh.remove(p.light); p.light.dispose(); }
                     scene.remove(p.mesh); p.mesh.geometry.dispose(); p.mesh.material.dispose();
                     pickups.splice(i, 1); updateUI();
                 }
-                if (p.age > 30) { scene.remove(p.mesh); p.mesh.geometry.dispose(); p.mesh.material.dispose(); pickups.splice(i, 1); }
+                if (p.age > 30) { if (p.light) { p.mesh.remove(p.light); p.light.dispose(); } scene.remove(p.mesh); p.mesh.geometry.dispose(); p.mesh.material.dispose(); pickups.splice(i, 1); }
             }
         }
 
@@ -1927,7 +1931,7 @@
             flash.position.copy(camera.position);
             const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
             flash.position.add(forward.multiplyScalar(0.5));
-            scene.add(flash); setTimeout(() => scene.remove(flash), 40);
+            scene.add(flash); setTimeout(() => { scene.remove(flash); flash.dispose(); }, 40);
             
             const ray = new THREE.Raycaster();
             ray.setFromCamera(new THREE.Vector2(0, 0), camera);
@@ -1943,12 +1947,15 @@
             for (let i = 0; i < pelletCount; i++) {
                 const offset = new THREE.Vector2((Math.random() - 0.5) * totalSpread * 2, (Math.random() - 0.5) * totalSpread * 2);
                 ray.setFromCamera(offset, camera);
-                const enemyIntersects = ray.intersectObjects(enemies.enemies.map(e => e.mesh));
+                const enemyIntersects = ray.intersectObjects(enemies.enemies.map(e => e.mesh), true);
                 let hitPoint = null;
-                
+
                 if(enemyIntersects.length > 0) {
                     const hitObj = enemyIntersects[0].object;
-                    const index = enemies.enemies.findIndex(e => e.mesh === hitObj);
+                    // Walk up parent chain to find the enemy Group
+                    let parentGroup = hitObj;
+                    while (parentGroup.parent && parentGroup.parent !== scene) parentGroup = parentGroup.parent;
+                    const index = enemies.enemies.findIndex(e => e.mesh === parentGroup);
                     if(index !== -1) {
                         hitPoint = enemyIntersects[0].point;
                         const enemy = enemies.enemies[index];
