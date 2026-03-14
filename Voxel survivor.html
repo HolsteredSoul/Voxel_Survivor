@@ -1195,10 +1195,10 @@
                     const baseScore = 50;
                     const finalScore = Math.round(baseScore * mult);
                     addKillFeed(e.type.name, finalScore);
+                    STATE.score += finalScore;
+                    STATE.enemiesKilled++;
                 }
                 this.enemies.splice(i, 1);
-                STATE.score += finalScore;
-                STATE.enemiesKilled++;
                 updateUI();
             }
         }
