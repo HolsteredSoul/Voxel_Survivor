@@ -702,9 +702,9 @@
                             const id = chunk.data[idx];
                             if(id===0) continue;
                             const faces = [
-                                {d:[1,0,0], l:0.8}, {d:[-1,0,0], l:0.8},
-                                {d:[0,1,0], l:1.0}, {d:[0,-1,0], l:0.5},
-                                {d:[0,0,1], l:0.6}, {d:[0,0,-1], l:0.6}
+                                {d:[1,0,0], l:0.75}, {d:[-1,0,0], l:0.75},
+                                {d:[0,1,0], l:1.0},  {d:[0,-1,0], l:0.5},
+                                {d:[0,0,1], l:0.75}, {d:[0,0,-1], l:0.75}
                             ];
                             for(const f of faces) {
                                 const nx=x+f.d[0], ny=y+f.d[1], nz=z+f.d[2];
@@ -961,8 +961,8 @@
                     if(e.mesh.position.y < -30) { this.kill(i); continue; }
                     
                     // Enemy bob animation — abs(sin) bobs upward only, lastBobY keeps physics clean
-                    const bobAmp = 0.04 * e.type.scale;
-                    const bobY = Math.abs(Math.sin(e.jitterTimer * e.type.speed * 3.0)) * bobAmp;
+                    const bobAmp = 0.025;
+                    const bobY = Math.abs(Math.sin(e.jitterTimer * 2.5)) * bobAmp;
                     e.mesh.position.y += bobY;
                     e.lastBobY = bobY;
 
@@ -1701,10 +1701,10 @@
             hemiLight.intensity = hemiIntensity;
 
             // Player torch at night — stronger range, warm flicker
-            const torchBase = Math.max(0, (1.2 - sunHeight * 4) * 10);
+            const torchBase = Math.max(0, 1.2 - sunHeight * 4);
             const flicker = 1.0 + (Math.random() - 0.5) * 0.12;
             playerLight.intensity = torchBase * flicker;
-            playerLight.distance = 25;
+            playerLight.distance = 30;
             playerLight.position.copy(player.pos);
             playerLight.position.y += 1.5;
             playerLight.color.setHex(0xffddaa);
