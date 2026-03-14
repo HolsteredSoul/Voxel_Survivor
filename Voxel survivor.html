@@ -960,14 +960,42 @@
                     e.mesh.lookAt(this.player.pos);
                     if(e.mesh.position.y < -30) { this.kill(i); continue; }
                     
-                    // Enemy eye glow (pulse)
+                    // Enemy bob animation
+                    const bobAmp = 0.07 * e.type.scale;
+                    const bobY = Math.sin(e.jitterTimer * e.type.speed * 5.0) * bobAmp;
+                    e.mesh.position.y += bobY;
+
+                    // Proximity threat scaling & eye intensity
                     if (e.eyeL) {
-                        const glow = 0.5 + Math.sin(performance.now() * 0.005 + i) * 0.5;
-                        e.eyeL.material.emissiveIntensity = glow;
-                        e.eyeR.material.emissiveIntensity = glow;
+                        if (dist < 5.0) {
+                            const threat = 1.0 - (dist / 5.0);
+                            const glow = 1.5 + threat * 2.0 + Math.sin(performance.now() * 0.008 + i) * 0.4;
+                            e.eyeL.material.emissiveIntensity = glow;
+                            e.eyeR.material.emissiveIntensity = glow;
+                            // Redden body as enemy closes in
+                            const base = e.type.color;
+                            const br = ((base >> 16) & 0xff) / 255;
+                            const bg = ((base >> 8) & 0xff) / 255;
+                            const bb = (base & 0xff) / 255;
+                            e.mesh.material.color.setRGB(Math.min(1, br + threat * 0.4), bg * (1 - threat * 0.3), bb * (1 - threat * 0.3));
+                            e.mesh.material.emissiveIntensity = 0.4 + threat * 0.8;
+                        } else {
+                            const glow = 0.3 + Math.sin(performance.now() * 0.008 + i) * 0.7;
+                            e.eyeL.material.emissiveIntensity = Math.max(0, glow);
+                            e.eyeR.material.emissiveIntensity = Math.max(0, glow);
+                            if (!e.hitFlashing) e.mesh.material.color.setHex(e.type.color);
+                            e.mesh.material.emissiveIntensity = 0.4;
+                        }
                     }
-                    
+
                     if(dist < 1.8) {
+                        // Lunge scale pop on attack
+                        if(!e.lunging) {
+                            e.lunging = true;
+                            const ls = e.type.scale * 1.25;
+                            e.mesh.scale.set(ls, ls, ls);
+                            setTimeout(() => { if(e && e.mesh) { e.mesh.scale.setScalar(e.type.scale); e.lunging = false; } }, 150);
+                        }
                         if(!e.lastAttack || performance.now() - e.lastAttack > 1000) {
                             STATE.health -= e.type.damage;
                             e.lastAttack = performance.now();
@@ -1018,7 +1046,7 @@
                 if (STATE.wave >= 2 && roll < 0.3) typeKey = 'runner';
                 else if (STATE.wave >= 3 && roll < 0.15) typeKey = 'brute';
                 const type = ENEMY_TYPES[typeKey];
-                const mat = new THREE.MeshStandardMaterial({ color: type.color, roughness: 0.8, metalness: 0.1 });
+                const mat = new THREE.MeshStandardMaterial({ color: type.color, roughness: 0.8, metalness: 0.1, emissive: 0x330000, emissiveIntensity: 0.4 });
                 const mesh = new THREE.Mesh(this.geo, mat);
                 mesh.position.set(x, y + 1, z);
                 mesh.material.transparent = true; mesh.material.opacity = 0;
@@ -1026,9 +1054,9 @@
                 this.scene.add(mesh);
                 
                 // Add glowing eyes
-                const eyeGeo = new THREE.BoxGeometry(0.12, 0.08, 0.05);
-                const eyeMat = new THREE.MeshStandardMaterial({ 
-                    color: 0xffff00, emissive: 0xffaa00, emissiveIntensity: 0.8 
+                const eyeGeo = new THREE.BoxGeometry(0.14, 0.10, 0.05);
+                const eyeMat = new THREE.MeshStandardMaterial({
+                    color: 0xff2200, emissive: 0xff0000, emissiveIntensity: 1.2
                 });
                 const eyeL = new THREE.Mesh(eyeGeo, eyeMat.clone());
                 const eyeR = new THREE.Mesh(eyeGeo, eyeMat.clone());
@@ -1159,9 +1187,18 @@
                 const e = this.enemies[i];
                 e.hp -= finalDamage;
                 
-                // Flash white (yellow for headshots)
-                e.mesh.material.color.setHex(isHeadshot ? 0xffff00 : 0xffffff);
-                setTimeout(() => { if(e && e.mesh) e.mesh.material.color.setHex(e.type.color); }, 80);
+                // Flash red (yellow for headshots) with brief scale pop
+                e.hitFlashing = true;
+                e.mesh.material.color.setHex(isHeadshot ? 0xffff00 : 0xff3300);
+                const hitScale = e.type.scale * 1.18;
+                e.mesh.scale.set(hitScale, hitScale, hitScale);
+                setTimeout(() => {
+                    if(e && e.mesh) {
+                        e.mesh.material.color.setHex(e.type.color);
+                        e.mesh.scale.setScalar(e.type.scale);
+                        e.hitFlashing = false;
+                    }
+                }, 120);
                 
                 // Floating damage number
                 const dmgPos = e.mesh.position.clone();
@@ -1535,7 +1572,7 @@
         scene.add(dirLight);
         
         // Ambient point light on player for visibility at night
-        const playerLight = new THREE.PointLight(0xffffff, 0, 15);
+        const playerLight = new THREE.PointLight(0xffffff, 0, 18);
         scene.add(playerLight);
 
         const world = new VoxelWorld(scene);
@@ -1578,8 +1615,8 @@
             scene.background.copy(skyColor);
             scene.fog.color.copy(skyColor);
             
-            // Directional light intensity and color
-            const lightIntensity = Math.max(0, sunHeight) * 0.8 + 0.1;
+            // Directional light intensity and color — goes fully to 0 at night
+            const lightIntensity = Math.max(0, sunHeight) * 0.9;
             dirLight.intensity = lightIntensity;
             dirLight.position.set(Math.cos(sunAngle) * 50, Math.max(sunHeight, 0.1) * 100, Math.sin(sunAngle) * 50);
             
@@ -1591,13 +1628,15 @@
                 dirLight.color.setHex(0x4444aa);
             }
             
-            // Hemisphere light
-            const hemiIntensity = Math.max(0.15, sunHeight * 0.5 + 0.4);
+            // Hemisphere light — darker at night so torch stands out
+            const hemiIntensity = Math.max(0.08, sunHeight * 0.5 + 0.4);
             hemiLight.intensity = hemiIntensity;
-            
-            // Player torch at night
-            const torchIntensity = Math.max(0, 0.8 - sunHeight * 3);
-            playerLight.intensity = torchIntensity;
+
+            // Player torch at night — stronger range, warm flicker
+            const torchBase = Math.max(0, 1.2 - sunHeight * 4);
+            const flicker = 1.0 + (Math.random() - 0.5) * 0.12;
+            playerLight.intensity = torchBase * flicker;
+            playerLight.distance = 18;
             playerLight.position.copy(player.pos);
             playerLight.position.y += 1.5;
             playerLight.color.setHex(0xffddaa);
