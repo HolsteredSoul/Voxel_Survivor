@@ -805,15 +805,13 @@
                         const spawnDuration = 0.6;
                         if(spawnAge < spawnDuration) {
                             const progress = spawnAge / spawnDuration;
-                            e.mesh.material.opacity = progress;
-                            const baseScale = e.type.scale;
-                            const scale = (0.5 + (progress * 0.5)) * baseScale;
-                            e.mesh.scale.set(scale, scale, scale);
+                            e.mesh.traverse(c => { if(c.isMesh) c.material.opacity = progress; });
+                            e.mesh.scale.setScalar((0.5 + progress * 0.5) * e.type.scale);
                             continue;
                         } else {
                             e.spawning = false;
-                            e.mesh.material.opacity = 1.0;
-                            e.mesh.scale.set(e.type.scale, e.type.scale, e.type.scale);
+                            e.mesh.traverse(c => { if(c.isMesh) c.material.opacity = 1.0; });
+                            e.mesh.scale.setScalar(e.type.scale);
                         }
                     }
                     
@@ -965,27 +963,13 @@
                     const bobY = Math.sin(e.jitterTimer * e.type.speed * 5.0) * bobAmp;
                     e.mesh.position.y += bobY;
 
-                    // Proximity threat scaling & eye intensity
+                    // Eye glow — always visible, pulses faster and brighter when close
                     if (e.eyeL) {
-                        if (dist < 5.0) {
-                            const threat = 1.0 - (dist / 5.0);
-                            const glow = 1.5 + threat * 2.0 + Math.sin(performance.now() * 0.008 + i) * 0.4;
-                            e.eyeL.material.emissiveIntensity = glow;
-                            e.eyeR.material.emissiveIntensity = glow;
-                            // Redden body as enemy closes in
-                            const base = e.type.color;
-                            const br = ((base >> 16) & 0xff) / 255;
-                            const bg = ((base >> 8) & 0xff) / 255;
-                            const bb = (base & 0xff) / 255;
-                            e.mesh.material.color.setRGB(Math.min(1, br + threat * 0.4), bg * (1 - threat * 0.3), bb * (1 - threat * 0.3));
-                            e.mesh.material.emissiveIntensity = 0.4 + threat * 0.8;
-                        } else {
-                            const glow = 0.3 + Math.sin(performance.now() * 0.008 + i) * 0.7;
-                            e.eyeL.material.emissiveIntensity = Math.max(0, glow);
-                            e.eyeR.material.emissiveIntensity = Math.max(0, glow);
-                            if (!e.hitFlashing) e.mesh.material.color.setHex(e.type.color);
-                            e.mesh.material.emissiveIntensity = 0.4;
-                        }
+                        const threat = dist < 6.0 ? (1.0 - dist / 6.0) : 0;
+                        const pulseSpeed = 0.005 + threat * 0.015;
+                        const glow = 0.8 + Math.sin(performance.now() * pulseSpeed + i) * 0.4 + threat * 1.5;
+                        e.eyeL.material.emissiveIntensity = glow;
+                        e.eyeR.material.emissiveIntensity = glow;
                     }
 
                     if(dist < 1.8) {
@@ -1046,28 +1030,111 @@
                 if (STATE.wave >= 2 && roll < 0.3) typeKey = 'runner';
                 else if (STATE.wave >= 3 && roll < 0.15) typeKey = 'brute';
                 const type = ENEMY_TYPES[typeKey];
-                const mat = new THREE.MeshStandardMaterial({ color: type.color, roughness: 0.8, metalness: 0.1, emissive: 0x330000, emissiveIntensity: 0.4 });
-                const mesh = new THREE.Mesh(this.geo, mat);
-                mesh.position.set(x, y + 1, z);
-                mesh.material.transparent = true; mesh.material.opacity = 0;
-                mesh.scale.set(0.5, 0.5, 0.5);
-                this.scene.add(mesh);
-                
-                // Add glowing eyes
-                const eyeGeo = new THREE.BoxGeometry(0.14, 0.10, 0.05);
-                const eyeMat = new THREE.MeshStandardMaterial({
-                    color: 0xff2200, emissive: 0xff0000, emissiveIntensity: 1.2
+
+                // Build multi-part voxel body
+                const group = new THREE.Group();
+                group.position.set(x, y + 1, z);
+
+                const mkMat = () => new THREE.MeshStandardMaterial({
+                    color: type.color, roughness: 0.8, metalness: 0.1, transparent: true, opacity: 0
                 });
-                const eyeL = new THREE.Mesh(eyeGeo, eyeMat.clone());
-                const eyeR = new THREE.Mesh(eyeGeo, eyeMat.clone());
-                eyeL.position.set(-0.12, 0.5, -0.31);
-                eyeR.position.set(0.12, 0.5, -0.31);
-                mesh.add(eyeL); mesh.add(eyeR);
-                
+
+                let headMesh;
+                const eyeGeo = new THREE.BoxGeometry(0.14, 0.10, 0.05);
+                const mkEyeMat = () => new THREE.MeshStandardMaterial({
+                    color: 0xffdd00, emissive: 0xffaa00, emissiveIntensity: 1.5, transparent: true, opacity: 0
+                });
+
+                if (typeKey === 'normal') {
+                    // Zombie: hunched torso, outstretched reaching arms
+                    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.62, 1.0, 0.52), mkMat());
+                    torso.position.y = 0.4;
+                    group.add(torso);
+
+                    headMesh = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.52, 0.52), mkMat());
+                    headMesh.position.set(0, 1.18, -0.04);
+                    group.add(headMesh);
+
+                    // Outstretched zombie arms angled forward
+                    const armGeo = new THREE.BoxGeometry(0.2, 0.62, 0.2);
+                    const armL = new THREE.Mesh(armGeo, mkMat());
+                    armL.position.set(-0.46, 0.82, -0.22);
+                    armL.rotation.x = -Math.PI / 4;
+                    group.add(armL);
+                    const armR = new THREE.Mesh(armGeo, mkMat());
+                    armR.position.set(0.46, 0.82, -0.22);
+                    armR.rotation.x = -Math.PI / 4;
+                    group.add(armR);
+
+                } else if (typeKey === 'runner') {
+                    // Runner: lean, hunched, arms swept back for speed
+                    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.88, 0.42), mkMat());
+                    torso.position.y = 0.32;
+                    torso.rotation.x = 0.35;
+                    group.add(torso);
+
+                    headMesh = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.4), mkMat());
+                    headMesh.position.set(0, 1.02, -0.18);
+                    group.add(headMesh);
+
+                    // Arms swept back (sprinting pose)
+                    const armGeo = new THREE.BoxGeometry(0.16, 0.55, 0.16);
+                    const armL = new THREE.Mesh(armGeo, mkMat());
+                    armL.position.set(-0.33, 0.52, 0.28);
+                    armL.rotation.x = Math.PI / 3.5;
+                    group.add(armL);
+                    const armR = new THREE.Mesh(armGeo, mkMat());
+                    armR.position.set(0.33, 0.52, 0.28);
+                    armR.rotation.x = Math.PI / 3.5;
+                    group.add(armR);
+
+                } else {
+                    // Brute: massive wide body, tiny head, thick shoulder pads
+                    const torso = new THREE.Mesh(new THREE.BoxGeometry(1.0, 1.15, 0.68), mkMat());
+                    torso.position.y = 0.48;
+                    group.add(torso);
+
+                    // Shoulder pads
+                    const sGeo = new THREE.BoxGeometry(0.38, 0.32, 0.42);
+                    const sL = new THREE.Mesh(sGeo, mkMat());
+                    sL.position.set(-0.72, 1.1, 0);
+                    group.add(sL);
+                    const sR = new THREE.Mesh(sGeo, mkMat());
+                    sR.position.set(0.72, 1.1, 0);
+                    group.add(sR);
+
+                    headMesh = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.46, 0.52), mkMat());
+                    headMesh.position.y = 1.42;
+                    group.add(headMesh);
+
+                    // Short thick arms hanging at sides
+                    const armGeo = new THREE.BoxGeometry(0.3, 0.68, 0.3);
+                    const armL = new THREE.Mesh(armGeo, mkMat());
+                    armL.position.set(-0.72, 0.58, -0.08);
+                    armL.rotation.z = 0.25;
+                    group.add(armL);
+                    const armR = new THREE.Mesh(armGeo, mkMat());
+                    armR.position.set(0.72, 0.58, -0.08);
+                    armR.rotation.z = -0.25;
+                    group.add(armR);
+                }
+
+                // Eyes on head
+                const eyeL = new THREE.Mesh(eyeGeo, mkEyeMat());
+                const eyeR = new THREE.Mesh(eyeGeo, mkEyeMat());
+                eyeL.userData.isEye = true;
+                eyeR.userData.isEye = true;
+                eyeL.position.set(-0.1, 0.04, -0.27);
+                eyeR.position.set(0.1, 0.04, -0.27);
+                headMesh.add(eyeL); headMesh.add(eyeR);
+
+                group.scale.setScalar(0.5 * type.scale);
+                this.scene.add(group);
+
                 this.createSpawnEffect(x, y + 1, z, type.color);
                 const baseHP = 2 + Math.floor(STATE.wave * 0.15);
                 this.enemies.push({
-                    mesh, hp: Math.ceil(baseHP * type.hp), maxHp: Math.ceil(baseHP * type.hp), type,
+                    mesh: group, hp: Math.ceil(baseHP * type.hp), maxHp: Math.ceil(baseHP * type.hp), type,
                     lastAttack: 0, vel: new THREE.Vector3(0, 0, 0), onGround: false, jumpCooldown: 0,
                     stuckTimer: 0, lastY: y + 1, spawnTime: performance.now(), spawning: true,
                     eyeL, eyeR
@@ -1187,14 +1254,14 @@
                 const e = this.enemies[i];
                 e.hp -= finalDamage;
                 
-                // Flash red (yellow for headshots) with brief scale pop
+                // Flash yellow/red on all body parts with brief scale pop
                 e.hitFlashing = true;
-                e.mesh.material.color.setHex(isHeadshot ? 0xffff00 : 0xff3300);
-                const hitScale = e.type.scale * 1.18;
-                e.mesh.scale.set(hitScale, hitScale, hitScale);
+                const flashCol = isHeadshot ? 0xffff00 : 0xff3300;
+                e.mesh.traverse(c => { if(c.isMesh && !c.userData.isEye) c.material.color.setHex(flashCol); });
+                e.mesh.scale.setScalar(e.type.scale * 1.18);
                 setTimeout(() => {
                     if(e && e.mesh) {
-                        e.mesh.material.color.setHex(e.type.color);
+                        e.mesh.traverse(c => { if(c.isMesh && !c.userData.isEye) c.material.color.setHex(e.type.color); });
                         e.mesh.scale.setScalar(e.type.scale);
                         e.hitFlashing = false;
                     }
@@ -1220,9 +1287,7 @@
                     this.createDeathGibs(pos, e.type.color, e.type.scale);
                     
                     this.scene.remove(e.mesh);
-                    e.mesh.material.dispose();
-                    if (e.eyeL) { e.eyeL.geometry.dispose(); e.eyeL.material.dispose(); }
-                    if (e.eyeR) { e.eyeR.geometry.dispose(); e.eyeR.material.dispose(); }
+                    e.mesh.traverse(c => { if(c.isMesh) { c.geometry.dispose(); c.material.dispose(); } });
                     if (Math.random() < 0.5) dropPickup(pos);
                     showHitMarker(true); audio.playKill();
                     
