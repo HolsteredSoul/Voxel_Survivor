@@ -588,9 +588,12 @@
                 tex.magFilter = THREE.NearestFilter;
                 tex.minFilter = THREE.NearestFilter;
 
-                this.material = new THREE.MeshLambertMaterial({ 
-                    map: tex, vertexColors: true, transparent: true, 
-                    alphaTest: 0.1, side: THREE.DoubleSide
+                // Phong lights per-pixel — Lambert is per-vertex in r128, which makes
+                // point lights (torch, pickups) band along block edges at night
+                this.material = new THREE.MeshPhongMaterial({
+                    map: tex, vertexColors: true, transparent: true,
+                    alphaTest: 0.1, side: THREE.DoubleSide,
+                    shininess: 0, specular: 0x000000
                 });
                 this.uvStride = 1.0 / 9.0;
             }
@@ -958,7 +961,7 @@
                     } else { e.onGround = false; }
                     
                     e.mesh.lookAt(this.player.pos);
-                    if(e.mesh.position.y < -30) { this.kill(i); continue; }
+                    if(e.mesh.position.y < -30) { this.kill(i, false); continue; }
                     
                     // Enemy bob animation — abs(sin) bobs upward only, lastBobY keeps physics clean
                     const bobAmp = 0.025;
@@ -1024,6 +1027,10 @@
                 const d = minDist + Math.random() * (maxDist - minDist);
                 const x = this.player.pos.x + Math.cos(angle) * d;
                 const z = this.player.pos.z + Math.sin(angle) * d;
+                // Spawn radius can exceed the circular draw distance — generate the chunk
+                // under the spawn point so enemies don't drop into an empty column
+                const scx = Math.floor(x / CHUNK_SIZE), scz = Math.floor(z / CHUNK_SIZE);
+                if (!this.world.chunks.has(`${scx},${scz}`)) this.world.generate(scx, scz);
                 let y = CHUNK_H;
                 for(let ty = CHUNK_H; ty > 0; ty--) {
                     if(this.world.get(Math.floor(x), ty - 1, Math.floor(z)) !== 0) { y = ty; break; }
@@ -1140,7 +1147,7 @@
                     mesh: group, hp: Math.ceil(baseHP * type.hp), maxHp: Math.ceil(baseHP * type.hp), type,
                     lastAttack: 0, vel: new THREE.Vector3(0, 0, 0), onGround: false, jumpCooldown: 0,
                     stuckTimer: 0, lastY: y + 1, spawnTime: performance.now(), spawning: true,
-                    eyeL, eyeR, lastBobY: 0
+                    eyeL, eyeR, headMesh, lastBobY: 0
                 });
             }
             
@@ -1281,27 +1288,29 @@
                 return false;
             }
 
-            kill(i) {
+            // award=false despawns silently (e.g. fell out of the world) — no score, gibs, or pickups
+            kill(i, award = true) {
                 const e = this.enemies[i];
                 if(e && e.mesh) {
                     const pos = e.mesh.position.clone();
-                    
-                    // Death gibs
-                    this.createDeathGibs(pos, e.type.color, e.type.scale);
-                    
+
                     this.scene.remove(e.mesh);
                     e.mesh.traverse(c => { if(c.isMesh) { c.geometry.dispose(); c.material.dispose(); } });
-                    if (Math.random() < 0.5) dropPickup(pos);
-                    showHitMarker(true); audio.playKill();
-                    
-                    // Streak + score
-                    addStreak();
-                    const mult = getStreakMultiplier();
-                    const baseScore = 50;
-                    const finalScore = Math.round(baseScore * mult);
-                    addKillFeed(e.type.name, finalScore);
-                    STATE.score += finalScore;
-                    STATE.enemiesKilled++;
+
+                    if (award) {
+                        this.createDeathGibs(pos, e.type.color, e.type.scale);
+                        if (Math.random() < 0.5) dropPickup(pos);
+                        showHitMarker(true); audio.playKill();
+
+                        // Streak + score
+                        addStreak();
+                        const mult = getStreakMultiplier();
+                        const baseScore = 50;
+                        const finalScore = Math.round(baseScore * mult);
+                        addKillFeed(e.type.name, finalScore);
+                        STATE.score += finalScore;
+                        STATE.enemiesKilled++;
+                    }
                 }
                 this.enemies.splice(i, 1);
                 updateUI();
@@ -1638,6 +1647,9 @@
         const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
         dirLight.position.set(50, 100, 50);
         scene.add(dirLight);
+        const moonLight = new THREE.DirectionalLight(0x99aaff, 0);
+        moonLight.position.set(-50, 100, -50);
+        scene.add(moonLight);
         
         // Ambient point light on player for visibility at night
         const playerLight = new THREE.PointLight(0xffffff, 0, 18);
@@ -1683,30 +1695,38 @@
             scene.background.copy(skyColor);
             scene.fog.color.copy(skyColor);
             
-            // Directional light intensity and color — goes fully to 0 at night
-            const lightIntensity = Math.max(0, sunHeight) * 0.9;
-            dirLight.intensity = lightIntensity;
-            dirLight.position.set(Math.cos(sunAngle) * 50, Math.max(sunHeight, 0.1) * 100, Math.sin(sunAngle) * 50);
-            
+            // Sun — eases out at the horizon instead of cutting to 0
+            dirLight.intensity = THREE.MathUtils.smoothstep(sunHeight, 0, 0.25) * 0.9;
+            dirLight.position.set(Math.cos(sunAngle) * 50, Math.max(sunHeight, 0.05) * 100, Math.sin(sunAngle) * 50);
+
             if (sunHeight > 0.2) {
                 dirLight.color.setHex(0xffffff);
-            } else if (sunHeight > 0) {
-                dirLight.color.lerpColors(new THREE.Color(0xff8844), new THREE.Color(0xffffff), sunHeight / 0.2);
             } else {
-                dirLight.color.setHex(0x4444aa);
+                dirLight.color.lerpColors(new THREE.Color(0xff8844), new THREE.Color(0xffffff), Math.max(0, sunHeight) / 0.2);
             }
-            
-            // Hemisphere light — darker at night so torch stands out
-            const hemiIntensity = Math.max(0.03, sunHeight * 0.5 + 0.4);
-            hemiLight.intensity = hemiIntensity;
 
-            // Player torch at night — stronger range, warm flicker
-            const torchBase = Math.max(0, 1.2 - sunHeight * 4);
-            const flicker = 1.0 + (Math.random() - 0.5) * 0.12;
+            // Moon — dim cool light opposite the sun so night terrain keeps its shape
+            moonLight.intensity = THREE.MathUtils.smoothstep(-sunHeight, 0, 0.25) * 0.3;
+            moonLight.position.set(-Math.cos(sunAngle) * 50, Math.max(-sunHeight, 0.05) * 100, -Math.sin(sunAngle) * 50);
+
+            // Hemisphere light — dim and moonlit-blue at night so the torch stands out
+            const hemiIntensity = Math.max(0.08, sunHeight * 0.5 + 0.4);
+            hemiLight.intensity = hemiIntensity;
+            hemiLight.color.lerpColors(new THREE.Color(0x8899cc), new THREE.Color(0xffffff), THREE.MathUtils.smoothstep(sunHeight, -0.2, 0.2));
+
+            // Player torch at night — capped intensity, smooth flicker, and the lit
+            // area biased toward where the player is looking
+            const torchBase = THREE.MathUtils.clamp(1.2 - sunHeight * 4, 0, 2.4);
+            const tSec = performance.now() * 0.001;
+            const flicker = 1.0 + Math.sin(tSec * 9.0) * 0.05 + Math.sin(tSec * 23.0) * 0.04;
             playerLight.intensity = torchBase * flicker;
-            playerLight.distance = 30;
+            playerLight.distance = 26;
+            playerLight.decay = 2;
             playerLight.position.copy(player.pos);
             playerLight.position.y += 1.5;
+            const yaw = player.yawObject.rotation.y;
+            playerLight.position.x -= Math.sin(yaw) * 1.5;
+            playerLight.position.z -= Math.cos(yaw) * 1.5;
             playerLight.color.setHex(0xffddaa);
         }
 
@@ -1830,6 +1850,7 @@
         });
         document.addEventListener('contextmenu', e => e.preventDefault());
         document.addEventListener('keydown', (e) => {
+            if(!STATE.active) return;
             if(e.key >= '1' && e.key <= '4') switchWeapon(parseInt(e.key) - 1);
             if(e.key === 'r' || e.key === 'R') reloadWeapon();
             if(e.key === 'f' || e.key === 'F') useStim();
@@ -1893,16 +1914,28 @@
                 
                 const dist = p.mesh.position.distanceTo(player.pos);
                 if (dist < 2.5) {
+                    let collected = false;
                     if (p.type === 'ammo') {
                         const amount = p.ammoType === 'pistol' ? 12 : p.ammoType === 'rifle' ? 30 : p.ammoType === 'shotgun' ? 8 : 25;
                         STATE.ammo[p.ammoType] += amount;
                         showPickupNotify(`+${amount} ${p.ammoType.toUpperCase()} ammo`);
-                    } else if (STATE.stims < STATE.maxStims) { STATE.stims += 1; showPickupNotify('+1 HEALTH STIM'); }
-                    else { showPickupNotify('STIMS FULL'); continue; }
-                    audio.playPickup();
-                    if (p.light) { p.mesh.remove(p.light); p.light.dispose(); }
-                    scene.remove(p.mesh); p.mesh.geometry.dispose(); p.mesh.material.dispose();
-                    pickups.splice(i, 1); updateUI();
+                        collected = true;
+                    } else if (STATE.stims < STATE.maxStims) {
+                        STATE.stims += 1; showPickupNotify('+1 HEALTH STIM');
+                        collected = true;
+                    } else if (!p.notifiedFull) {
+                        p.notifiedFull = true;
+                        showPickupNotify('STIMS FULL');
+                    }
+                    if (collected) {
+                        audio.playPickup();
+                        if (p.light) { p.mesh.remove(p.light); p.light.dispose(); }
+                        scene.remove(p.mesh); p.mesh.geometry.dispose(); p.mesh.material.dispose();
+                        pickups.splice(i, 1); updateUI();
+                        continue;
+                    }
+                } else {
+                    p.notifiedFull = false;
                 }
                 if (p.age > 30) { if (p.light) { p.mesh.remove(p.light); p.light.dispose(); } scene.remove(p.mesh); p.mesh.geometry.dispose(); p.mesh.material.dispose(); pickups.splice(i, 1); }
             }
@@ -1959,10 +1992,7 @@
                     if(index !== -1) {
                         hitPoint = enemyIntersects[0].point;
                         const enemy = enemies.enemies[index];
-                        const enemyTop = enemy.mesh.position.y + 0.9 * enemy.type.scale;
-                        const enemyBottom = enemy.mesh.position.y - 0.9 * enemy.type.scale;
-                        const headThreshold = enemyBottom + (enemyTop - enemyBottom) * 0.7;
-                        const isHeadshot = hitPoint.y > headThreshold;
+                        const isHeadshot = hitObj === enemy.headMesh || hitObj.parent === enemy.headMesh;
                         
                         const headshotMult = weapon.headshotMult || 1.5;
                         const finalDamage = isHeadshot ? weapon.damage * headshotMult : weapon.damage;
