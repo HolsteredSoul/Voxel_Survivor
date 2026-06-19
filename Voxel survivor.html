@@ -90,6 +90,14 @@
         @media (min-width: 768px) { .subtitle { font-size: 18px; } }
         .btn { background: #4CAF50; color: white; border: none; padding: 15px 40px; font-size: 20px; font-weight: bold; cursor: pointer; margin-top: 20px; border-radius: 4px; transition: 0.2s; border-bottom: 4px solid #388E3C; pointer-events: auto; }
         .btn:hover { background: #66BB6A; transform: translateY(-2px); }
+        .btn.secondary { background: transparent; border: 2px solid #666; border-bottom: 4px solid #444; color: #ccc; font-size: 16px; padding: 10px 30px; }
+        .btn.secondary:hover { background: rgba(255,255,255,0.08); }
+
+        /* Pause overlay (shown on pointer-lock loss mid-run; run state is preserved) */
+        #pause { position: absolute; inset: 0; background: rgba(0,0,0,0.85); display: none; flex-direction: column; align-items: center; justify-content: center; color: white; pointer-events: auto; z-index: 150; padding: 20px; text-align: center; }
+        #pause h1 { color: #4CAF50; font-size: 40px; }
+        @media (min-width: 768px) { #pause h1 { font-size: 64px; } }
+        #menu-msg { color: #ffcc66; font-size: 14px; font-weight: 700; margin: 8px 0 0; text-align: center; max-width: 90%; }
         
         #damage-flash { position: absolute; inset: 0; background: red; opacity: 0; pointer-events: none; transition: opacity 0.15s; mix-blend-mode: multiply; }
         
@@ -294,7 +302,7 @@
         <div id="weapon-btns">
             <div class="weapon-btn active" data-weapon="0">Pistol</div>
             <div class="weapon-btn" data-weapon="1">Rifle</div>
-            <div class="weapon-btn" data-weapon="2">Shotgn</div>
+            <div class="weapon-btn" data-weapon="2">Shotgun</div>
             <div class="weapon-btn" data-weapon="3">SMG</div>
         </div>
     </div>
@@ -329,6 +337,7 @@
             </div>
         </div>
         
+        <p id="menu-msg"></p>
         <button class="btn" id="startBtn">START GAME</button>
     </div>
 
@@ -342,12 +351,24 @@
         <button class="btn" id="restartBtn">PLAY AGAIN</button>
     </div>
 
+    <div id="pause">
+        <h1>PAUSED</h1>
+        <p class="subtitle" id="pause-msg">Your run is still in progress. Click to resume.</p>
+        <button class="btn" id="resumeBtn">RESUME</button>
+        <button class="btn secondary" id="quitBtn">QUIT TO MENU</button>
+    </div>
+
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script>
         // --- MOBILE DETECTION ---
-        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || 
-                         ('ontouchstart' in window) || 
-                         (navigator.maxTouchPoints > 0);
+        // A touchscreen alone (Surface, many Chromebooks) shouldn't force the mobile UI —
+        // only treat as mobile when the UA is a known mobile device, OR the *only* pointer is
+        // coarse (touch) with no fine pointer (mouse/trackpad) available.
+        const _coarseOnly = !!(window.matchMedia &&
+            window.matchMedia('(pointer: coarse)').matches &&
+            !window.matchMedia('(pointer: fine)').matches);
+        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+                         (navigator.maxTouchPoints > 0 && _coarseOnly);
         
         if (isMobile) document.body.classList.add('is-mobile');
         
@@ -424,7 +445,7 @@
         const PLAYER_SPEED = 8.0;
         const SPRINT_SPEED = 12.0;
         const JUMP_FORCE = 11.0;
-        const PICKUP_RANGE = 3.0;
+        const PICKUP_RANGE = 2.5;
 
         // --- WEAPON DEFINITIONS ---
         const WEAPONS = [
@@ -444,6 +465,7 @@
         // --- STATE ---
         const STATE = {
             active: false,
+            paused: false,
             score: 0,
             wave: 0,
             health: 100,
@@ -780,7 +802,8 @@
                         }
                     }
                     STATE.wave++;
-                    
+                    updateUI(); // reflect the new wave on the HUD immediately (avoids showing WAVE 0 at start)
+
                     const spawnDelay = STATE.wave === 1 ? 2000 : 4000; // Shorter first wave
                     setTimeout(() => {
                         this.showWaveAnnouncement(STATE.wave);
@@ -1037,8 +1060,10 @@
                 }
                 let typeKey = 'normal';
                 const roll = Math.random();
-                if (STATE.wave >= 2 && roll < 0.3) typeKey = 'runner';
-                else if (STATE.wave >= 3 && roll < 0.15) typeKey = 'brute';
+                // Brute must be tested before runner — otherwise the runner range shadows it
+                // and brutes (intended from wave 3) never spawn. Bands: brute 0–.15, runner .15–.45.
+                if (STATE.wave >= 3 && roll < 0.15) typeKey = 'brute';
+                else if (STATE.wave >= 2 && roll < (STATE.wave >= 3 ? 0.45 : 0.30)) typeKey = 'runner';
                 const type = ENEMY_TYPES[typeKey];
 
                 // Build multi-part voxel body
@@ -1856,26 +1881,152 @@
             if(e.key === 'f' || e.key === 'F') useStim();
         });
 
+        // ===== Desktop pointer-lock capture =====
+        // pointerlockchange is the SINGLE source of truth: STATE.active is true ONLY while the mouse
+        // is actually captured, so gameplay can never run with a free cursor. (Mobile is untouched —
+        // it has no lock and sets STATE.active directly.)
+        let runStarted = false;   // a run exists (started, maybe paused); reset on gameOver/quit
+        let everLocked = false;   // lock engaged at least once this run -> start-context vs mid-run
+        let lockPending = false;  // a lock request is in flight; debounces duplicate failure signals
+        let lockFailCount = 0;    // consecutive failed acquisitions -> escalates the guidance message
+        let lockTimer = null;     // silent-failure watchdog (embedders that fire no event)
+
+        const elPause = () => document.getElementById('pause');
+        const elPauseMsg = () => document.getElementById('pause-msg');
+        const elMenu = () => document.getElementById('menu');
+        const elMenuMsg = () => document.getElementById('menu-msg');
+
+        function lockUnavailableMsg(forStart) {
+            return forStart
+                ? "Mouse capture isn't available here. If this is an embedded preview, open the game in a real browser tab or window, then press START."
+                : "Mouse capture can't re-engage here. If this is an embedded preview, open the game in a real browser tab or window. Otherwise click to retry.";
+        }
+
+        function armLockWatchdog() {
+            if (lockTimer) clearTimeout(lockTimer);
+            // Longer than the browser's post-Esc re-lock cooldown (~1.25s) so a slightly-delayed
+            // legitimate lock isn't misreported. A fire here means NO event arrived = silent denial.
+            lockTimer = setTimeout(() => {
+                lockTimer = null;
+                if (document.pointerLockElement !== document.body) lockFailed('timeout');
+            }, 3000);
+        }
+
+        // Request lock with raw input (unadjustedMovement) + the canonical NotSupportedError fallback.
+        // MUST run synchronously inside a user-gesture handler, or the browser rejects with SecurityError.
+        function requestLock() {
+            if (isMobile) return;
+            if (document.pointerLockElement === document.body) return; // already captured
+            if (lockPending) return;                                   // one request at a time
+            lockPending = true;
+            armLockWatchdog();
+            let p;
+            try { p = document.body.requestPointerLock({ unadjustedMovement: true }); }
+            catch (e) { lockFailed(e && e.name); return; }
+            if (p && typeof p.then === 'function') {
+                p.then(() => { /* success is confirmed by pointerlockchange */ })
+                 .catch((err) => {
+                     const name = err && err.name;
+                     if (name === 'NotSupportedError') {
+                         // Platform can't strip mouse acceleration -> retry a plain lock in this gesture.
+                         armLockWatchdog();
+                         let p2;
+                         try { p2 = document.body.requestPointerLock(); }
+                         catch (e2) { lockFailed(e2 && e2.name); return; }
+                         if (p2 && typeof p2.then === 'function') p2.catch((e3) => lockFailed(e3 && e3.name));
+                     } else {
+                         lockFailed(name);
+                     }
+                 });
+            }
+            // Void return (Firefox/Safari ignore the option): rely on the events + watchdog.
+        }
+
+        // A lock request did not engage (error event, promise rejection, or silent-failure watchdog).
+        // Never auto-retries — the user's next click is the only re-acquisition path.
+        function lockFailed(reason) {
+            if (lockTimer) { clearTimeout(lockTimer); lockTimer = null; }
+            if (document.pointerLockElement === document.body) { lockPending = false; return; } // stale: we ARE locked
+            if (!lockPending) return;        // this request's failure already handled (debounce)
+            lockPending = false;
+            STATE.active = false;
+            if (!runStarted) return;         // nothing in progress to surface (e.g. after quit)
+            lockFailCount++;
+            // 'timeout' (no event in 3s) and SecurityError (sandboxed) reliably mean "genuinely blocked";
+            // a transient cooldown denial gets a neutral retry prompt first, escalating after a 2nd failure.
+            const blocked = reason === 'timeout' || reason === 'SecurityError' || lockFailCount >= 2;
+            if (!everLocked) {
+                // Start-context failure -> the start menu (coherent wording; START retries).
+                STATE.paused = false;
+                if (elMenuMsg()) elMenuMsg().innerText = blocked ? lockUnavailableMsg(true) : 'Click START to capture your mouse and play.';
+                elPause().style.display = 'none';
+                elMenu().style.display = 'flex';
+            } else {
+                // Mid-run failure -> pause overlay (run preserved; a click re-locks).
+                STATE.paused = true;
+                if (elPauseMsg()) elPauseMsg().innerText = blocked ? lockUnavailableMsg(false) : 'Your run is still in progress. Click to resume.';
+                elPause().style.display = 'flex';
+            }
+        }
+
         // Start game
         document.getElementById('startBtn').onclick = () => {
             audio.init();
-            STATE.active = true;
-            document.getElementById('menu').style.display = 'none';
+            if (elMenuMsg()) elMenuMsg().innerText = '';
             if (isMobile) {
+                document.getElementById('menu').style.display = 'none';
+                STATE.active = true;
                 if (document.documentElement.requestFullscreen) {
                     document.documentElement.requestFullscreen().catch(() => {});
                 }
             } else {
-                document.body.requestPointerLock();
+                // Keep the menu up until capture is confirmed (pointerlockchange hides it). If lock
+                // fails (embedded preview), lockFailed() reuses the still-visible menu for its message.
+                runStarted = true;
+                everLocked = false;
+                lockFailCount = 0;
+                requestLock();
             }
         };
         
         document.getElementById('restartBtn').onclick = () => location.reload();
+        // RESUME and any click on the pause overlay re-request the lock from a real gesture (required
+        // after an Esc-driven unlock). QUIT reloads to a fresh menu.
+        document.getElementById('resumeBtn').onclick = (e) => { e.stopPropagation(); requestLock(); };
+        document.getElementById('quitBtn').onclick = (e) => { e.stopPropagation(); location.reload(); };
+        document.getElementById('pause').addEventListener('click', (e) => {
+            if (e.target.closest('button')) return; // RESUME / QUIT handle themselves
+            requestLock();
+        });
+
+        document.addEventListener('pointerlockerror', () => {
+            if (isMobile) return;
+            if (document.pointerLockElement !== document.body) lockFailed('error');
+        });
 
         document.addEventListener('pointerlockchange', () => {
-            if (!isMobile && document.pointerLockElement !== document.body) {
+            if (isMobile) return;
+            if (document.pointerLockElement === document.body) {
+                // Confirmed capture — the ONLY place STATE.active goes true on desktop.
+                if (lockTimer) { clearTimeout(lockTimer); lockTimer = null; }
+                lockPending = false;
+                lockFailCount = 0;
+                everLocked = true;
+                runStarted = true;
+                STATE.paused = false;
+                STATE.active = true;
+                elMenu().style.display = 'none';
+                elPause().style.display = 'none';
+            } else {
+                // Lock lost — drop activation immediately so no aim/input runs unlocked.
                 STATE.active = false;
-                document.getElementById('menu').style.display = 'flex';
+                lockPending = false;
+                if (runStarted) {
+                    // Mid-run loss (Esc, alt-tab, fullscreen exit) → pause and preserve the run.
+                    STATE.paused = true;
+                    if (elPauseMsg()) elPauseMsg().innerText = 'Your run is still in progress. Click to resume.';
+                    elPause().style.display = 'flex';
+                }
             }
         });
 
@@ -1913,7 +2064,7 @@
                 if (p.light) p.light.intensity = 0.3 + Math.sin(p.age * 4) * 0.2;
                 
                 const dist = p.mesh.position.distanceTo(player.pos);
-                if (dist < 2.5) {
+                if (dist < PICKUP_RANGE) {
                     let collected = false;
                     if (p.type === 'ammo') {
                         const amount = p.ammoType === 'pistol' ? 12 : p.ammoType === 'rifle' ? 30 : p.ammoType === 'shotgun' ? 8 : 25;
@@ -1948,7 +2099,7 @@
             if (now - STATE.lastShot < weapon.fireRate) return;
             if (STATE.weaponAmmo[STATE.currentWeapon] <= 0) { reloadWeapon(); return; }
             
-            STATE.weaponAmmo[STATE.currentWeapon]--; STATE.lastShot = now; STATE.shotsFired++;
+            STATE.weaponAmmo[STATE.currentWeapon]--; STATE.lastShot = now;
             
             if (player && player.gunGroup) player.gunRecoil = weapon.recoil || 0.3;
             if (player) player.screenShake = Math.max(player.screenShake, (weapon.recoil || 0.3) * 0.5);
@@ -1969,6 +2120,8 @@
             const ray = new THREE.Raycaster();
             ray.setFromCamera(new THREE.Vector2(0, 0), camera);
             const pelletCount = weapon.name === 'Shotgun' ? 8 : 1;
+            // Count shots per-pellet so shotgun accuracy can't exceed 100% (shotsHit ticks per pellet)
+            STATE.shotsFired += pelletCount;
             
             const baseSpread = weapon.spread || 0.01;
             const totalSpread = baseSpread + (weapon.bloomPerShot ? STATE.currentBloom : 0);
@@ -2045,13 +2198,18 @@
             const reserve = STATE.ammo[weapon.ammoType];
             if (currentAmmo >= weapon.maxAmmo || reserve <= 0) return;
             STATE.reloading = true; STATE.reloadTime = weapon.reloadTime;
-            setTimeout(() => {
-                const needed = weapon.maxAmmo - currentAmmo;
-                const toReload = Math.min(needed, reserve);
-                STATE.weaponAmmo[STATE.currentWeapon] += toReload;
-                STATE.ammo[weapon.ammoType] -= toReload;
-                STATE.reloading = false; STATE.reloadTime = 0; updateUI();
-            }, weapon.reloadTime * 1000);
+            // Completion is driven by the frame loop (finishReload), not setTimeout — that keeps the
+            // countdown and the actual ammo refill in lock-step even if the tab is backgrounded.
+        }
+
+        function finishReload() {
+            const weapon = WEAPONS[STATE.currentWeapon]; // weapon can't change mid-reload (switchWeapon is blocked)
+            const currentAmmo = STATE.weaponAmmo[STATE.currentWeapon];
+            const reserve = STATE.ammo[weapon.ammoType];
+            const toReload = Math.min(weapon.maxAmmo - currentAmmo, reserve);
+            STATE.weaponAmmo[STATE.currentWeapon] += toReload;
+            STATE.ammo[weapon.ammoType] -= toReload;
+            STATE.reloading = false; STATE.reloadTime = 0; updateUI();
         }
         
         function switchWeapon(index) {
@@ -2113,24 +2271,39 @@
             } else { reloadEl.style.display = 'none'; reloadProgressEl.style.display = 'none'; }
             
             if (!isMobile) {
-                const hb = document.getElementById('hotbar');
-                hb.innerHTML = '';
-                for(let i = 0; i < WEAPONS.length; i++) {
-                    const div = document.createElement('div');
-                    div.className = `slot ${STATE.currentWeapon === i ? 'active' : ''}`;
-                    div.innerHTML = `<span class="slot-key">${i + 1}</span>${WEAPONS[i].name}`;
-                    const count = document.createElement('span');
-                    count.className = 'slot-count'; count.innerText = STATE.weaponAmmo[i] || 0;
-                    div.appendChild(count);
-                    div.onmousedown = () => switchWeapon(i);
-                    hb.appendChild(div);
+                // Hotbar is built once (buildHotbar); here we only update the cheap dynamic bits.
+                // updateUI() runs every frame mid-reload, so rebuilding the DOM here was needless thrash.
+                const slots = document.getElementById('hotbar').children;
+                for (let i = 0; i < slots.length; i++) {
+                    slots[i].classList.toggle('active', STATE.currentWeapon === i);
+                    const count = slots[i].querySelector('.slot-count');
+                    if (count) count.innerText = STATE.weaponAmmo[i] || 0;
                 }
             }
         }
 
+        function buildHotbar() {
+            const hb = document.getElementById('hotbar');
+            hb.innerHTML = '';
+            for (let i = 0; i < WEAPONS.length; i++) {
+                const div = document.createElement('div');
+                div.className = 'slot';
+                div.innerHTML = `<span class="slot-key">${i + 1}</span>${WEAPONS[i].name}<span class="slot-count"></span>`;
+                div.onmousedown = () => switchWeapon(i);
+                hb.appendChild(div);
+            }
+        }
+
         function gameOver() {
+            if (!STATE.active) return; // idempotent: enemy melee + the health<=0 loop check can both fire same frame
             STATE.active = false;
-            if (!isMobile) document.exitPointerLock();
+            STATE.paused = false;
+            runStarted = false;   // run is over — the lock-loss from exitPointerLock below must NOT re-pause
+            lockPending = false;
+            if (lockTimer) { clearTimeout(lockTimer); lockTimer = null; }
+            STATE.reloading = false; STATE.reloadTime = 0; // cancel any in-flight reload
+            if (!isMobile) { try { document.exitPointerLock(); } catch (e) {} }
+            document.getElementById('pause').style.display = 'none';
             document.getElementById('game-over').style.display = 'flex';
             document.getElementById('final-wave').innerText = STATE.wave;
             document.getElementById('final-kills').innerText = STATE.enemiesKilled;
@@ -2156,10 +2329,10 @@
                 updateStreak(dt);
                 updateDayNight(dt);
                 
-                if (STATE.reloading && STATE.reloadTime > 0) {
+                if (STATE.reloading) {
                     STATE.reloadTime -= dt;
-                    if (STATE.reloadTime <= 0) STATE.reloadTime = 0;
-                    updateUI();
+                    if (STATE.reloadTime <= 0) finishReload();
+                    else updateUI();
                 }
                 
                 // SMG bloom decay
@@ -2193,6 +2366,7 @@
 
         world.generate(0, 0);
         player.pos.set(8, 40, 8);
+        if (!isMobile) buildHotbar();
         updateUI();
         animate();
 
