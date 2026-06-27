@@ -1664,7 +1664,11 @@
         const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
         const renderer = new THREE.WebGLRenderer({ antialias: false });
         renderer.setSize(window.innerWidth, window.innerHeight);
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        // Supersample for crisper voxel edges: ~50% finer linear resolution
+        // (≈125% more pixels) on typical 1–2x displays. Capped at 3 so very
+        // high-DPR phones don't melt.
+        const RENDER_SCALE = 1.5;
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio * RENDER_SCALE, 3));
         document.body.appendChild(renderer.domElement);
 
         const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.8);
